@@ -1,12 +1,15 @@
 # vps_app.py
-"""NIDAR Python Backend - FastAPI + PyMAVLink + WebSockets"""
+"""NIDAR Python Backend - FastAPI + PyMAVLink + WebSockets + SQLAlchemy"""
 import asyncio, json, time, os
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException
+from datetime import datetime
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException, Depends
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from pymavlink import mavutil
 from mission_utils import request_mission, upload_mission
+from sqlalchemy.orm import Session
+from models import init_db, get_db, Vehicle, Detection, Mission, MissionLog
 
 app = FastAPI(title="NIDAR Python Backend", version="1.0.0")
 templates = Jinja2Templates(directory="templates")
@@ -18,14 +21,40 @@ VPS_PORTS = {
     5762: {"vehicle_id": "delivery", "sysid": None}
 }
 
-# In-memory storage (replace with SQLAlchemy for persistence)
-VEHICLES = {}       # vehicle_id -> metadata dict
-TELEMETRY = {}      # vehicle_id -> list of telemetry points
-DETECTIONS = []     # list of detection dicts
-MISSIONS = {}       # vehicle_id -> cached mission list
-WS_BY_VEH = {}      # vehicle_id -> [websockets]
-MAVLINK_CONNS = {}  # port -> mavlink connection object
-CAP = 5000          # max telemetry points to keep
+# Real-time storage (in-memory for performance)
+TELEMETRY_CACHE = {}      # vehicle_id -> list of recent telemetry (last 500 points)
+WS_BY_VEH = {}            # vehicle_id -> [websockets]
+MAVLINK_CONNS = {}        # port -> mavlink connection object
+TELEMETRY_CAP = 500       # max telemetry points to keep in cache
+
+# ==================== Database Initialization ====================
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database and launch MAVLink listeners"""
+    # Initialize database
+    init_db()
+    print("[Startup] Database initialized")
+    
+    # Create default vehicle records if they don't exist
+    db = next(get_db())
+    for port, cfg in VPS_PORTS.items():
+        vid = cfg["vehicle_id"]
+        existing = db.query(Vehicle).filter(Vehicle.vehicle_id == vid).first()
+        if not existing:
+            new_vehicle = Vehicle(
+                vehicle_id=vid,
+                name=vid.capitalize(),
+                port=port,
+                status="disconnected"
+            )
+            db.add(new_vehicle)
+    db.commit()
+    db.close()
+    
+    # Launch MAVLink listeners
+    for port, cfg in VPS_PORTS.items():
+        asyncio.create_task(mavlink_tcpin(port, cfg))
+    print("[Startup] MAVLink tasks launched")
 
 # ==================== Template Routes ====================
 @app.get("/")
@@ -34,19 +63,51 @@ async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 @app.get("/dashboard")
-async def dashboard(request: Request):
+async def dashboard(request: Request, db: Session = Depends(get_db)):
     """Main dashboard with vehicle overview"""
+    vehicles = db.query(Vehicle).all()
+    vehicles_data = [
+        {
+            "vehicle_id": v.vehicle_id,
+            "name": v.name,
+            "sysid": v.sysid,
+            "last_seen": v.last_seen,
+            "last_pos": {
+                "lat": v.last_pos_lat,
+                "lon": v.last_pos_lon,
+                "alt": v.last_pos_alt
+            } if v.last_pos_lat else None,
+            "battery": v.battery,
+            "status": v.status
+        }
+        for v in vehicles
+    ]
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
-        "vehicles": list(VEHICLES.values())
+        "vehicles": vehicles_data
     })
 
 @app.get("/detections")
-async def detections_page(request: Request):
+async def detections_page(request: Request, db: Session = Depends(get_db)):
     """Detections management page"""
+    detections = db.query(Detection).order_by(Detection.ts.desc()).all()
+    detections_data = [
+        {
+            "id": d.id,
+            "vehicle_id": d.vehicle_id,
+            "lat": d.lat,
+            "lon": d.lon,
+            "conf": d.conf,
+            "img": d.img_path,
+            "ts": d.ts,
+            "approved": d.approved,
+            "delivered": d.delivered
+        }
+        for d in detections
+    ]
     return templates.TemplateResponse("detection_panel.html", {
         "request": request,
-        "detections": DETECTIONS
+        "detections": detections_data
     })
 
 # ==================== WebSocket Manager ====================
@@ -98,13 +159,18 @@ async def mavlink_tcpin(port: int, cfg: dict):
             if hb:
                 sysid = hb.get_srcSystem()
                 comp = hb.get_srcComponent()
-                VEHICLES.setdefault(vid, {}).update({
-                    "vehicle_id": vid,
-                    "sysid": sysid,
-                    "compid": comp,
-                    "port": port,
-                    "last_seen": int(time.time() * 1000)
-                })
+                
+                # Update database
+                db = next(get_db())
+                vehicle = db.query(Vehicle).filter(Vehicle.vehicle_id == vid).first()
+                if vehicle:
+                    vehicle.sysid = sysid
+                    vehicle.compid = comp
+                    vehicle.last_seen = int(time.time() * 1000)
+                    vehicle.status = "connected"
+                    db.commit()
+                db.close()
+                
                 print(f"[MAVLink] {vid} connected: sysid={sysid}, comp={comp}")
                 await ws_send(vid, {
                     "topic": "heartbeat",
@@ -133,20 +199,28 @@ async def mavlink_tcpin(port: int, cfg: dict):
                         lon = float(getattr(msg, 'lon', 0))
                         alt = float(getattr(msg, 'alt', 0))
                     
-                    TELEMETRY.setdefault(vid, []).append({
+                    # Cache telemetry for performance
+                    TELEMETRY_CACHE.setdefault(vid, []).append({
                         "ts": now,
                         "lat": lat,
                         "lon": lon,
                         "alt": alt
                     })
-                    if len(TELEMETRY[vid]) > CAP:
-                        TELEMETRY[vid] = TELEMETRY[vid][-CAP:]
+                    if len(TELEMETRY_CACHE[vid]) > TELEMETRY_CAP:
+                        TELEMETRY_CACHE[vid] = TELEMETRY_CACHE[vid][-TELEMETRY_CAP:]
                     
-                    VEHICLES.setdefault(vid, {})["last_pos"] = {
-                        "lat": lat,
-                        "lon": lon,
-                        "alt": alt
-                    }
+                    # Update vehicle position in database (async to avoid blocking)
+                    db = next(get_db())
+                    vehicle = db.query(Vehicle).filter(Vehicle.vehicle_id == vid).first()
+                    if vehicle:
+                        vehicle.last_pos_lat = lat
+                        vehicle.last_pos_lon = lon
+                        vehicle.last_pos_alt = alt
+                        vehicle.last_seen = now
+                        db.commit()
+                    db.close()
+                    
+                    # Broadcast via WebSocket
                     await ws_send(vid, {
                         "topic": "telemetry",
                         "data": {"ts": now, "lat": lat, "lon": lon, "alt": alt}
@@ -170,18 +244,27 @@ async def mavlink_tcpin(port: int, cfg: dict):
                 
                 elif t == 'SYS_STATUS':
                     battery = getattr(msg, 'battery_remaining', -1)
-                    VEHICLES.setdefault(vid, {})["battery"] = battery
+                    # Update database
+                    db = next(get_db())
+                    vehicle = db.query(Vehicle).filter(Vehicle.vehicle_id == vid).first()
+                    if vehicle:
+                        vehicle.battery = battery
+                        db.commit()
+                    db.close()
         
         except Exception as e:
             print(f"[MAVLink] Error on port {port}: {e}")
+            # Mark as disconnected
+            try:
+                db = next(get_db())
+                vehicle = db.query(Vehicle).filter(Vehicle.vehicle_id == vid).first()
+                if vehicle:
+                    vehicle.status = "disconnected"
+                    db.commit()
+                db.close()
+            except:
+                pass
             await asyncio.sleep(1)
-
-@app.on_event("startup")
-async def startup_event():
-    """Launch MAVLink listeners on startup"""
-    for port, cfg in VPS_PORTS.items():
-        asyncio.create_task(mavlink_tcpin(port, cfg))
-    print("[Startup] MAVLink tasks launched")
 
 # ==================== Detection Upload ====================
 import aiofiles
@@ -193,7 +276,8 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 async def upload_detection(
     vehicle_id: str,
     image: UploadFile = File(...),
-    meta: str = Form(None)
+    meta: str = Form(None),
+    db: Session = Depends(get_db)
 ):
     """Scout uploads detection image with metadata"""
     if vehicle_id not in [v["vehicle_id"] for v in VPS_PORTS.values()]:
@@ -210,20 +294,34 @@ async def upload_detection(
     except:
         meta_j = {}
     
+    # Create detection in database
+    new_detection = Detection(
+        vehicle_id=vehicle_id,
+        lat=meta_j.get("lat"),
+        lon=meta_j.get("lon"),
+        conf=meta_j.get("conf"),
+        img_path=f"/uploads/{fname}",
+        ts=int(time.time() * 1000),
+        approved=False,
+        delivered=False
+    )
+    db.add(new_detection)
+    db.commit()
+    db.refresh(new_detection)
+    
     rec = {
-        "id": len(DETECTIONS) + 1,
+        "id": new_detection.id,
         "vehicle_id": vehicle_id,
-        "lat": meta_j.get("lat"),
-        "lon": meta_j.get("lon"),
-        "conf": meta_j.get("conf"),
-        "img": f"/uploads/{fname}",
-        "ts": int(time.time() * 1000),
+        "lat": new_detection.lat,
+        "lon": new_detection.lon,
+        "conf": new_detection.conf,
+        "img": new_detection.img_path,
+        "ts": new_detection.ts,
         "approved": False
     }
-    DETECTIONS.append(rec)
     
     await ws_send(vehicle_id, {"topic": "detection", "detection": rec})
-    return {"ok": True, "id": rec["id"]}
+    return {"ok": True, "id": new_detection.id}
 
 # ==================== Mission Management ====================
 async def fetch_mission_task(vehicle_id: str):
@@ -356,17 +454,25 @@ def generate_delivery_mission_simple(
     return mission
 
 @app.post("/api/detections/{detection_id}/approve")
-async def approve_detection(detection_id: int, payload: dict):
+async def approve_detection(detection_id: int, payload: dict, db: Session = Depends(get_db)):
     """Approve detection and upload delivery mission"""
     delivery = payload.get("delivery_vehicle_id", "delivery")
     
-    det = next((d for d in DETECTIONS if d['id'] == detection_id), None)
-    if not det:
+    # Get detection from database
+    detection = db.query(Detection).filter(Detection.id == detection_id).first()
+    if not detection:
         raise HTTPException(status_code=404, detail="Detection not found")
-    if det.get("approved"):
+    if detection.approved:
         raise HTTPException(status_code=400, detail="Already approved")
     
-    mission = generate_delivery_mission_simple(det)
+    det_dict = {
+        "id": detection.id,
+        "lat": detection.lat,
+        "lon": detection.lon,
+        "vehicle_id": detection.vehicle_id
+    }
+    
+    mission = generate_delivery_mission_simple(det_dict)
     port = next((k for k, v in VPS_PORTS.items() if v["vehicle_id"] == delivery), None)
     
     try:
@@ -381,51 +487,122 @@ async def approve_detection(detection_id: int, payload: dict):
             None, upload_mission, conn, tsys, mission, 0, 12.0
         )
         
-        det['approved'] = True
-        det['approved_ts'] = int(time.time() * 1000)
-        det['delivery'] = delivery
+        # Create mission record in database
+        new_mission = Mission(
+            vehicle_id=delivery,
+            items_json=json.dumps(mission),
+            status="uploaded",
+            created_ts=int(time.time() * 1000)
+        )
+        db.add(new_mission)
         
-        await ws_send(det['vehicle_id'], {
+        # Update detection as approved
+        detection.approved = True
+        detection.delivered_mission_id = new_mission.id
+        db.commit()
+        db.refresh(detection)
+        db.refresh(new_mission)
+        
+        det_response = {
+            "id": detection.id,
+            "vehicle_id": detection.vehicle_id,
+            "approved": True
+        }
+        
+        await ws_send(detection.vehicle_id, {
             "topic": "detection_approved",
-            "detection": det
+            "detection": det_response
         })
         await ws_send(delivery, {
             "topic": "mission_uploaded",
-            "mission": mission
+            "mission": mission,
+            "mission_id": new_mission.id
         })
         
-        return {"ok": True}
+        return {"ok": True, "mission_id": new_mission.id}
     except Exception as e:
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== REST API Endpoints ====================
 @app.get("/api/vehicles")
-async def list_vehicles():
+async def list_vehicles(db: Session = Depends(get_db)):
     """List all vehicles"""
-    return {"vehicles": list(VEHICLES.values())}
+    vehicles = db.query(Vehicle).all()
+    return {"vehicles": [
+        {
+            "vehicle_id": v.vehicle_id,
+            "name": v.name,
+            "sysid": v.sysid,
+            "last_seen": v.last_seen,
+            "last_pos_lat": v.last_pos_lat,
+            "last_pos_lon": v.last_pos_lon,
+            "last_pos_alt": v.last_pos_alt,
+            "battery": v.battery,
+            "status": v.status
+        }
+        for v in vehicles
+    ]}
 
 @app.get("/api/vehicles/{vehicle_id}")
-async def get_vehicle(vehicle_id: str):
+async def get_vehicle(vehicle_id: str, db: Session = Depends(get_db)):
     """Get vehicle details"""
-    if vehicle_id not in VEHICLES:
+    vehicle = db.query(Vehicle).filter(Vehicle.vehicle_id == vehicle_id).first()
+    if not vehicle:
         raise HTTPException(status_code=404, detail="Vehicle not found")
-    return VEHICLES[vehicle_id]
+    return {
+        "vehicle_id": vehicle.vehicle_id,
+        "name": vehicle.name,
+        "sysid": vehicle.sysid,
+        "last_seen": vehicle.last_seen,
+        "last_pos_lat": vehicle.last_pos_lat,
+        "last_pos_lon": vehicle.last_pos_lon,
+        "last_pos_alt": vehicle.last_pos_alt,
+        "battery": vehicle.battery,
+        "status": vehicle.status
+    }
 
 @app.get("/api/vehicles/{vehicle_id}/telemetry")
 async def get_telemetry(vehicle_id: str, limit: int = 500):
-    """Get recent telemetry"""
-    telem = TELEMETRY.get(vehicle_id, [])
+    """Get recent cached telemetry"""
+    telem = TELEMETRY_CACHE.get(vehicle_id, [])
     return {"telemetry": telem[-limit:]}
 
 @app.get("/api/detections")
-async def list_detections():
+async def list_detections(db: Session = Depends(get_db)):
     """List all detections"""
-    return {"detections": DETECTIONS}
+    detections = db.query(Detection).order_by(Detection.ts.desc()).all()
+    return {"detections": [
+        {
+            "id": d.id,
+            "vehicle_id": d.vehicle_id,
+            "lat": d.lat,
+            "lon": d.lon,
+            "conf": d.conf,
+            "img": d.img_path,
+            "ts": d.ts,
+            "approved": d.approved,
+            "delivered": d.delivered
+        }
+        for d in detections
+    ]}
 
 @app.get("/api/missions")
-async def list_missions():
+async def list_missions(db: Session = Depends(get_db)):
     """List all missions"""
-    return {"missions": MISSIONS}
+    missions = db.query(Mission).order_by(Mission.created_ts.desc()).all()
+    return {"missions": [
+        {
+            "id": m.id,
+            "vehicle_id": m.vehicle_id,
+            "items": json.loads(m.items_json) if m.items_json else [],
+            "status": m.status,
+            "created_ts": m.created_ts,
+            "started_ts": m.started_ts,
+            "finished_ts": m.finished_ts
+        }
+        for m in missions
+    ]}
 
 # Make uploads folder accessible
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
