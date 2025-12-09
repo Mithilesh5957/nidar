@@ -1,0 +1,14 @@
+[Unit]
+Description=Nidar Delivery Drone SITL
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/nidar/pis/delivery
+ExecStart=/bin/bash /home/pi/nidar/pis/delivery/delivery_start.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

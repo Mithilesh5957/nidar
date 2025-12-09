@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Detections - NIDAR</title>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0f0f1e;
+            color: #e0e0e0;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 1.5rem 2rem;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            font-size: 2rem;
+        }
+
+        .back-btn {
+            color: white;
+            text-decoration: none;
+            padding: 0.7rem 1.5rem;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 6px;
+            transition: background 0.3s ease;
+        }
+
+        .back-btn:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        .detections-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 2rem;
+        }
+
+        .detection-card {
+            background: #1a1a2e;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+            border: 1px solid #2a2a3e;
+            transition: transform 0.3s ease;
+        }
+
+        .detection-card:hover {
+            transform: translateY(-5px);
+        }
+
+        .detection-image {
+            width: 100%;
+            height: 200px;
+            background: #252540;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #888;
+        }
+
+        .detection-image img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .detection-body {
+            padding: 1.5rem;
+        }
+
+        .detection-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.4rem 1rem;
+            border-radius: 12px;
+            font-size: 0.85rem;
+            font-weight: bold;
+        }
+
+        .badge-pending {
+            background: #ff9800;
+            color: white;
+        }
+
+        .badge-approved {
+            background: #4caf50;
+            color: white;
+        }
+
+        .detection-info {
+            margin-bottom: 1rem;
+        }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid #2a2a3e;
+        }
+
+        .info-row:last-child {
+            border-bottom: none;
+        }
+
+        .label {
+            color: #888;
+            font-size: 0.9rem;
+        }
+
+        .value {
+            color: #e0e0e0;
+            font-weight: bold;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 0.8rem 1.5rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.3s ease;
+            width: 100%;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn:disabled {
+            background: #2a2a3e;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: #1a1a2e;
+            padding: 2rem;
+            border-radius: 12px;
+            max-width: 500px;
+            width: 90%;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+        }
+
+        .modal-header h2 {
+            color: #667eea;
+        }
+
+        .close-btn {
+            background: none;
+            border: none;
+            color: white;
+            font-size: 1.5rem;
+            cursor: pointer;
+        }
+
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            color: #888;
+        }
+
+        .form-group select {
+            width: 100%;
+            padding: 0.8rem;
+            background: #252540;
+            border: 1px solid #2a2a3e;
+            border-radius: 6px;
+            color: white;
+            font-size: 1rem;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="header">
+        <h1>🎯 Detection Management</h1>
+        <a href="/dashboard" class="back-btn">← Back to Dashboard</a>
+    </div>
+
+    <div class="container">
+        <div class="detections-grid" id="detections-grid">
+            <!-- Detections will be loaded here -->
+        </div>
+    </div>
+
+    <!-- Approval Modal -->
+    <div id="approval-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Approve Detection</h2>
+                <button class="close-btn" onclick="closeModal()">×</button>
+            </div>
+            <div class="form-group">
+                <label for="delivery-select">Select Delivery Drone:</label>
+                <select id="delivery-select">
+                    <option value="delivery">Delivery Drone</option>
+                </select>
+            </div>
+            <button class="btn" onclick="confirmApproval()">✓ Approve & Dispatch</button>
+        </div>
+    </div>
+
+    <script>
+        let currentDetectionId = null;
+
+        function loadDetections() {
+            fetch('/api/detections')
+                .then(r => r.json())
+                .then(data => {
+                    const grid = document.getElementById('detections-grid');
+
+                    if (!data.detections || data.detections.length === 0) {
+                        grid.innerHTML = '<p style="color: #888; text-align: center; grid-column: 1/-1;">No detections found</p>';
+                        return;
+                    }
+
+                    grid.innerHTML = data.detections.reverse().map(d => {
+                        const date = new Date(d.ts).toLocaleString();
+                        return `
+                        <div class="detection-card">
+                            <div class="detection-image">
+                                ${d.img ? `<img src="${d.img}" alt="Detection">` : '📷 No Image'}
+                            </div>
+                            <div class="detection-body">
+                                <div class="detection-header">
+                                    <span class="badge ${d.approved ? 'badge-approved' : 'badge-pending'}">
+                                        ${d.approved ? '✓ Approved' : '⏳ Pending'}
+                                    </span>
+                                    <span style="font-size: 0.85rem; color: #888;">#${d.id}</span>
+                                </div>
+                                <div class="detection-info">
+                                    <div class="info-row">
+                                        <span class="label">Vehicle:</span>
+                                        <span class="value">${d.vehicle_id}</span>
+                                    </div>
+                                    <div class="info-row">
+                                        <span class="label">Latitude:</span>
+                                        <span class="value">${d.lat ? d.lat.toFixed(6) : 'N/A'}</span>
+                                    </div>
+                                    <div class="info-row">
+                                        <span class="label">Longitude:</span>
+                                        <span class="value">${d.lon ? d.lon.toFixed(6) : 'N/A'}</span>
+                                    </div>
+                                    <div class="info-row">
+                                        <span class="label">Confidence:</span>
+                                        <span class="value">${d.conf ? (d.conf * 100).toFixed(1) + '%' : 'N/A'}</span>
+                                    </div>
+                                    <div class="info-row">
+                                        <span class="label">Timestamp:</span>
+                                        <span class="value">${date}</span>
+                                    </div>
+                                </div>
+                                <button class="btn" 
+                                        onclick="approveDetection(${d.id})" 
+                                        ${d.approved ? 'disabled' : ''}>
+                                    ${d.approved ? '✓ Already Approved' : '✈️ Approve & Dispatch'}
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                    }).join('');
+                })
+                .catch(err => {
+                    console.error('Error loading detections:', err);
+                });
+        }
+
+        function approveDetection(detectionId) {
+            currentDetectionId = detectionId;
+            document.getElementById('approval-modal').classList.add('active');
+        }
+
+        function closeModal() {
+            document.getElementById('approval-modal').classList.remove('active');
+            currentDetectionId = null;
+        }
+
+        function confirmApproval() {
+            const deliveryVehicle = document.getElementById('delivery-select').value;
+
+            fetch(`/api/detections/${currentDetectionId}/approve`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    delivery_vehicle_id: deliveryVehicle
+                })
+            })
+                .then(r => r.json())
+                .then(data => {
+                    alert('Detection approved! Mission uploaded to delivery drone.');
+                    closeModal();
+                    loadDetections();
+                })
+                .catch(err => {
+                    alert('Error approving detection: ' + err);
+                });
+        }
+
+        // Load detections on page load
+        loadDetections();
+        // Refresh every 10 seconds
+        setInterval(loadDetections, 10000);
+    </script>
+</body>
+
+</html>

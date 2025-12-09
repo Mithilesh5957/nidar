@@ -1,0 +1,15 @@
+[Unit]
+Description=Nidar Scout Capture Service
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/nidar/pis/scout
+Environment="VPS_URL=http://YOUR_VPS_IP:8000"
+ExecStart=/usr/bin/python3 /home/pi/nidar/pis/scout/scout_main.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
