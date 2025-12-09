@@ -11,8 +11,8 @@ services:
       - "5760:5760"    # Scout MAVLink TCP
       - "5762:5762"    # Delivery MAVLink TCP
     volumes:
-      - ./backend/uploads:/app/uploads
-      - ./backend/nidar.db:/app/nidar.db
+      - ../backend/uploads:/app/uploads
+      - nidar-data:/app
     environment:
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
@@ -31,3 +31,6 @@ services:
   #   depends_on:
   #     - nidar-backend
   #   restart: unless-stopped
+
+volumes:
+  nidar-data:

@@ -14,8 +14,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY backend/ .
 
-# Create uploads directory
-RUN mkdir -p uploads
+# Create required directories
+RUN mkdir -p uploads static
 
 # Expose ports
 EXPOSE 8000 5760 5762
