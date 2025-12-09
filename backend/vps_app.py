@@ -6,14 +6,50 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi import status
+from pydantic import ValidationError
 from pymavlink import mavutil
 from mission_utils import request_mission, upload_mission
 from sqlalchemy.orm import Session
 from models import init_db, get_db, Vehicle, Detection, Mission, MissionLog
+from validation import (
+    DetectionMetadata, ApproveDetectionRequest, VehicleResponse,
+    TelemetryQueryParams, FileUploadValidator, ErrorResponse
+)
 
 app = FastAPI(title="NIDAR Python Backend", version="1.0.0")
 templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Global exception handler for validation errors
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Handle Pydantic validation errors"""
+    errors = []
+    for error in exc.errors():
+        errors.append({
+            "field": ".".join(str(x) for x in error["loc"][1:]),
+            "message": error["msg"],
+            "type": error["type"]
+        })
+    
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "detail": "Validation error",
+            "errors": errors
+        }
+    )
+
+@app.exception_handler(ValueError)
+async def value_error_handler(request: Request, exc: ValueError):
+    """Handle ValueError exceptions"""
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content={"detail": str(exc)}
+    )
+
 
 # Configuration: ports -> vehicle mapping
 VPS_PORTS = {
@@ -272,34 +308,58 @@ import aiofiles
 UPLOAD_DIR = "./uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-@app.post("/api/upload_detection/{vehicle_id}")
+@app.post("/api/upload_detection/{vehicle_id}", response_model=dict)
 async def upload_detection(
     vehicle_id: str,
     image: UploadFile = File(...),
     meta: str = Form(None),
     db: Session = Depends(get_db)
 ):
-    """Scout uploads detection image with metadata"""
+    """Scout uploads detection image with metadata (with validation)"""
+    # Validate vehicle exists
     if vehicle_id not in [v["vehicle_id"] for v in VPS_PORTS.values()]:
-        raise HTTPException(status_code=404, detail="Unknown vehicle")
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown vehicle: {vehicle_id}"
+        )
     
-    fname = f"{vehicle_id}_{int(time.time() * 1000)}_{image.filename}"
+    # Validate file upload
+    try:
+        await FileUploadValidator.validate_image(image)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    # Parse and validate metadata
+    try:
+        if meta:
+            meta_dict = json.loads(meta)
+            metadata = DetectionMetadata(**meta_dict)
+        else:
+            metadata = DetectionMetadata()
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON in metadata")
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=e.errors())
+    
+    # Save file with sanitized filename
+    import re
+    safe_filename = re.sub(r'[^\w\-_\.]', '', image.filename)
+    fname = f"{vehicle_id}_{int(time.time() * 1000)}_{safe_filename}"
     path = os.path.join(UPLOAD_DIR, fname)
     
-    async with aiofiles.open(path, 'wb') as f:
-        await f.write(await image.read())
+    # Ensure upload directory exists
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
     
-    try:
-        meta_j = json.loads(meta) if meta else {}
-    except:
-        meta_j = {}
+    async with aiofiles.open(path, 'wb') as f:
+        content = await image.read()
+        await f.write(content)
     
     # Create detection in database
     new_detection = Detection(
         vehicle_id=vehicle_id,
-        lat=meta_j.get("lat"),
-        lon=meta_j.get("lon"),
-        conf=meta_j.get("conf"),
+        lat=metadata.lat,
+        lon=metadata.lon,
+        conf=metadata.conf,
         img_path=f"/uploads/{fname}",
         ts=int(time.time() * 1000),
         approved=False,
@@ -454,16 +514,31 @@ def generate_delivery_mission_simple(
     return mission
 
 @app.post("/api/detections/{detection_id}/approve")
-async def approve_detection(detection_id: int, payload: dict, db: Session = Depends(get_db)):
-    """Approve detection and upload delivery mission"""
-    delivery = payload.get("delivery_vehicle_id", "delivery")
+async def approve_detection(
+    detection_id: int,
+    request: ApproveDetectionRequest,
+    db: Session = Depends(get_db)
+):
+    """Approve detection and upload delivery mission (with validation)"""
+    delivery = request.delivery_vehicle_id
+    
+    # Validate detection_id
+    if detection_id < 1:
+        raise HTTPException(status_code=400, detail="Invalid detection ID")
     
     # Get detection from database
     detection = db.query(Detection).filter(Detection.id == detection_id).first()
     if not detection:
         raise HTTPException(status_code=404, detail="Detection not found")
     if detection.approved:
-        raise HTTPException(status_code=400, detail="Already approved")
+        raise HTTPException(status_code=400, detail="Detection already approved")
+    
+    # Validate coordinates exist
+    if detection.lat is None or detection.lon is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Detection missing GPS coordinates. Cannot create mission."
+        )
     
     det_dict = {
         "id": detection.id,
@@ -475,17 +550,32 @@ async def approve_detection(detection_id: int, payload: dict, db: Session = Depe
     mission = generate_delivery_mission_simple(det_dict)
     port = next((k for k, v in VPS_PORTS.items() if v["vehicle_id"] == delivery), None)
     
+    if not port:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Delivery vehicle '{delivery}' not configured"
+        )
+    
     try:
         conn = MAVLINK_CONNS.get(port)
         if not conn:
             conn = mavutil.mavlink_connection(f"tcp:127.0.0.1:{port}", source_system=255)
         
         hb = conn.recv_match(type='HEARTBEAT', blocking=True, timeout=5)
+        if not hb:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Delivery drone '{delivery}' not responding"
+            )
+        
         tsys = hb.get_srcSystem()
         
         ok = await asyncio.get_event_loop().run_in_executor(
             None, upload_mission, conn, tsys, mission, 0, 12.0
         )
+        
+        if not ok:
+            raise HTTPException(status_code=500, detail="Mission upload failed")
         
         # Create mission record in database
         new_mission = Mission(

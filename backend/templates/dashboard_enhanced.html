@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NIDAR Dashboard - Enhanced</title>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js"></script>
+    <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+
+<body>
+    <div class="header">
+        <h1>⚡ NIDAR Command Center - Live Tracking</h1>
+    </div>
+
+    <div id="notification" class="notification"></div>
+
+    <div class="container">
+        <!-- Live Map (Full Width) -->
+        <div class="card map-card">
+            <h2>🗺️ Live Drone Tracking Map</h2>
+            <div id="map"></div>
+        </div>
+
+        <div class="dashboard-grid">
+            <!-- Scout Drone Card -->
+            <div class="card vehicle-card">
+                <h2>🚁 Scout Drone</h2>
+                <div class="vehicle-status">
+                    <span>
+                        <span class="status-indicator" id="scout-indicator"></span>
+                        <span id="scout-status">Disconnected</span>
+                    </span>
+                    <span class="badge badge-approved" id="scout-sysid">SYS: --</span>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-box">
+                        <div class="stat-value" id="scout-alt-stat">--</div>
+                        <div class="stat-label">Alt (m)</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-value" id="scout-batt">--</div>
+                        <div class="stat-label">Battery</div>
+                    </div>
+                </div>
+
+                <div class="telemetry-item">
+                    <span class="label">Lat/Lon:</span>
+                    <span class="value" id="scout-coords">--</span>
+                </div>
+
+                <div class="chart-container">
+                    <canvas id="scout-alt-chart"></canvas>
+                </div>
+
+                <div style="margin-top: 1rem;">
+                    <button class="btn" onclick="fetchMission('scout')">📥 Fetch</button>
+                    <button class="btn btn-danger" onclick="sendRTL('scout')">🏠 RTL</button>
+                </div>
+            </div>
+
+            <!-- Delivery Drone Card -->
+            <div class="card vehicle-card">
+                <h2>📦 Delivery Drone</h2>
+                <div class="vehicle-status">
+                    <span>
+                        <span class="status-indicator" id="delivery-indicator"></span>
+                        <span id="delivery-status">Disconnected</span>
+                    </span>
+                    <span class="badge badge-approved" id="delivery-sysid">SYS: --</span>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-box">
+                        <div class="stat-value" id="delivery-alt-stat">--</div>
+                        <div class="stat-label">Alt (m)</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-value" id="delivery-wp">--</div>
+                        <div class="stat-label">Waypoint</div>
+                    </div>
+                </div>
+
+                <div class="telemetry-item">
+                    <span class="label">Lat/Lon:</span>
+                    <span class="value" id="delivery-coords">--</span>
+                </div>
+
+                <div class="chart-container">
+                    <canvas id="delivery-alt-chart"></canvas>
+                </div>
+
+                <div style="margin-top: 1rem;">
+                    <button class="btn" onclick="fetchMission('delivery')">📥 Fetch</button>
+                    <button class="btn btn-danger" onclick="sendRTL('delivery')">🏠 RTL</button>
+                </div>
+            </div>
+
+            <!-- Recent Detections -->
+            <div class="card">
+                <h2>🎯 Recent Detections</h2>
+                <div id="detections-container">
+                    <p style="color: #888; text-align: center;">No detections yet...</p>
+                </div>
+                <a href="/detections" class="btn"
+                    style="display: inline-block; margin-top: 1rem; text-decoration: none;">View All →</a>
+            </div>
+        </div>
+
+        <!-- Console -->
+        <div class="card">
+            <h2>📡 System Console</h2>
+            <div id="console"></div>
+        </div>
+    </div>
+
+    <script src="/static/dashboard.js"></script>
+</body>
+
+</html>
