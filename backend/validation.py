@@ -1,6 +1,6 @@
 # validation.py
 """Pydantic validation models for NIDAR API"""
-from pydantic import BaseModel, Field, validator, constr
+from pydantic import BaseModel, Field, field_validator, constr
 from typing import Optional, List
 from enum import Enum
 
@@ -23,12 +23,15 @@ class DetectionMetadata(BaseModel):
     lon: Optional[float] = Field(None, ge=-180.0, le=180.0, description="Longitude in decimal degrees")
     conf: Optional[float] = Field(None, ge=0.0, le=1.0, description="Detection confidence score")
     
-    @validator('lat', 'lon')
-    def validate_coordinates(cls, v, field):
+    
+    @field_validator('lat', 'lon')
+    @classmethod
+    def validate_coordinates(cls, v, info):
         if v is not None:
-            if field.name == 'lat' and abs(v) < 0.0001:
+            field_name = info.field_name
+            if field_name == 'lat' and abs(v) < 0.0001:
                 raise ValueError("Latitude too close to zero, likely invalid")
-            if field.name == 'lon' and abs(v) < 0.0001:
+            if field_name == 'lon' and abs(v) < 0.0001:
                 raise ValueError("Longitude too close to zero, likely invalid")
         return v
     
@@ -76,7 +79,9 @@ class MissionWaypoint(BaseModel):
     y: float = Field(description="Longitude or Y position")
     z: float = Field(description="Altitude or Z position")
     
-    @validator('z')
+    
+    @field_validator('z')
+    @classmethod
     def validate_altitude(cls, v):
         if v < 0 or v > 1000:
             raise ValueError("Altitude must be between 0-1000m")
@@ -113,7 +118,9 @@ class ApproveDetectionRequest(BaseModel):
         description="Vehicle ID of delivery drone"
     )
     
-    @validator('delivery_vehicle_id')
+    
+    @field_validator('delivery_vehicle_id')
+    @classmethod
     def validate_vehicle_id(cls, v):
         allowed = ['delivery', 'delivery1', 'delivery2']  # Configure as needed
         if v not in allowed:
