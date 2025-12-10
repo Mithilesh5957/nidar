@@ -11,11 +11,10 @@ echo "  Raspberry Pi 4 Bookworm 64-bit"
 echo "=================================="
 echo ""
 
-# Check if running as pi user
-if [ "$USER" != "pi" ]; then
-    echo "⚠️  Please run as 'pi' user"
-    exit 1
-fi
+# Get current user
+CURRENT_USER=$(whoami)
+echo "✓ Running as user: $CURRENT_USER"
+echo ""
 
 # Prompt for VPS IP
 read -p "Enter your VPS IP address (e.g., 192.168.1.100): " VPS_IP
@@ -88,8 +87,8 @@ After=network.target
 
 [Service]
 Type=simple
-User=pi
-ExecStart=/home/pi/.local/bin/mavproxy.py --master=127.0.0.1:14550 --out=tcp:$VPS_IP:5760
+User=$CURRENT_USER
+ExecStart=/home/$CURRENT_USER/.local/bin/mavproxy.py --master=127.0.0.1:14550 --out=tcp:$VPS_IP:5760
 Restart=always
 RestartSec=5
 
@@ -130,7 +129,7 @@ echo "5. Check VPS dashboard:"
 echo "   http://$VPS_IP:8000/dashboard"
 echo ""
 echo "📝 Configuration saved to:"
-echo "   ~/nidar/pis/scout/scout_main.py"
+echo "   /home/$CURRENT_USER/nidar/pis/scout/scout_main.py"
 echo ""
 echo "🔄 Services will auto-start on reboot"
 echo ""
